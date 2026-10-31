@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Swap Draw</title>
+<style>
+:root{--bg:#faf8f4;--fg:#26231f;--mut:#7a746b;--card:#fff;--line:#e3ddd3;--acc:#e0563b;--accfg:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1b19;--fg:#f1ede6;--mut:#a39d92;--card:#262522;--line:#3a3834;--acc:#ef7058;--accfg:#1c1b19}}
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:720px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:28px;margin:8px 0 4px}p{margin:6px 0}.mut{color:var(--mut)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-top:16px}
+button,select,input{font:inherit;color:inherit}
+.btn{background:var(--acc);color:var(--accfg);border:0;border-radius:10px;padding:10px 18px;cursor:pointer;font-weight:600}
+.btn.alt{background:transparent;color:var(--fg);border:1px solid var(--line)}
+input{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:9px 12px}
+#joincode{width:110px;text-transform:uppercase;letter-spacing:.2em;text-align:center}
+.num{width:90px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+.hide{display:none!important}
+.code{font-size:44px;font-weight:700;letter-spacing:.25em;margin:8px 0}
+.bar{height:8px;background:var(--line);border-radius:99px;overflow:hidden;margin:8px 0}
+.bar i{display:block;height:100%;width:100%;background:var(--acc);transition:width .25s linear}
+.top{display:flex;justify-content:space-between;align-items:baseline}
+#time{font-size:28px;font-weight:700;font-variant-numeric:tabular-nums}
+canvas{width:100%;aspect-ratio:4/3;background:#fff;border:1px solid var(--line);border-radius:12px;touch-action:none;cursor:crosshair;display:block}
+.tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.sw{width:28px;height:28px;border-radius:50%;border:2px solid var(--line);cursor:pointer;padding:0}
+.sw.on{outline:3px solid var(--acc);outline-offset:1px}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media (max-width:560px){.pair{grid-template-columns:1fr}}
+.pair img{width:100%;border:1px solid var(--line);border-radius:12px;background:#fff;display:block}
+#msg{color:var(--acc);min-height:1.5em;margin-top:8px}
+</style>
+</head>
+<body>
+<main>
+<h1>Swap Draw</h1>
+<p class="mut">Two people, two secret drawings. When the timer ends, you trade pictures and keep going on your partner’s.</p>
+<div id="msg"></div>
+
+<section id="lobby" class="card">
+  <strong>Start a new game</strong>
+  <div class="row">
+    <label>Seconds per turn <input id="dur" class="num" type="number" min="5" max="3600" value="60"></label>
+    <label>Turns <input id="rounds" class="num" type="number" min="2" max="20" value="2"></label>
+    <button class="btn" id="create">Create game</button>
+  </div>
+  <hr style="border:0;border-top:1px solid var(--line);margin:20px 0">
+  <strong>Join a friend’s game</strong>
+  <div class="row"><input id="joincode" maxlength="4" placeholder="CODE"><button class="btn alt" id="join">Join</button></div>
+</section>
+
+<section id="wait" class="card hide">
+  <p>Share this code with your partner:</p>
+  <div class="code" id="showcode"></div>
+  <p class="mut">The game starts as soon as they join.</p>
+</section>
+
+<section id="swap" class="card hide">
+  <p><strong id="swaptitle">Swapping pictures…</strong></p>
+  <p class="mut">Waiting for your partner to finish.</p>
+</section>
+
+<section id="play" class="hide">
+  <div class="top"><span>Turn <b id="turn"></b></span><span id="time"></span></div>
+  <div class="bar"><i id="fill"></i></div>
+  <canvas id="cv" width="640" height="480"></canvas>
+  <div class="tools">
+    <span id="sws" class="tools" style="margin:0"></span>
+    <button class="btn alt" id="eraser">Eraser</button>
+    <button class="btn alt" id="undo">Undo</button>
+    <label class="mut">Size <input type="range" id="size" min="2" max="40" value="6" style="width:100px;padding:0"></label>
+  </div>
+</section>
+
+<section id="reveal" class="card hide">
+  <strong>The big reveal</strong>
+  <div class="pair" id="pair" style="margin-top:12px"></div>
+  <div class="row"><button class="btn" id="again">Play again</button></div>
+</section>
+</main>
+
+<script>
+const $=s=>document.querySelector(s);
+const views=['lobby','wait','swap','play','reveal'];
+const show=v=>views.forEach(x=>$('#'+x).classList.toggle('hide',x!==v));
+const note=t=>{$('#msg').textContent=t||''};
+let ws,slot,cfg,code,live=false,curRound=0,curKey='A',pending={},lastSave=null,gen=0;
+
+/* ---------- connection ---------- */
+let token=null,active=false,closing=false,retry=0,pingT=null;
+function connect(then){
+  if(ws){ws.onclose=null;try{ws.close()}catch(e){}}
+  const s=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host);
+  ws=s;
+  s.onopen=()=>{retry=0;clearInterval(pingT);pingT=setInterval(()=>tx({type:'ping'}),25000);then()};
+  s.onerror=()=>{};
+  s.onclose=()=>{
+    if(s!==ws)return;
+    clearInterval(pingT);
+    if(closing||!active)return note('Couldn’t reach the server.');
+    reconnect();
+  };
+  s.onmessage=e=>{
+    const m=JSON.parse(e.data);
+    if(m.type==='created'){code=m.code;token=m.token;active=true;$('#showcode').textContent=code;show('wait')}
+    else if(m.type==='start'){slot=m.slot;cfg=m.cfg;code=m.code;token=m.token;active=true;note();run()}
+    else if(m.type==='paper'){const f=pending[m.key];delete pending[m.key];f&&f.res(m.img)}
+    else if(m.type==='resumed'){
+      note();
+      if(lastSave)tx(lastSave);
+      for(const k in pending)tx({type:'need',key:k,min:pending[k].min});
+    }
+    else if(m.type==='away'){note('Your partner lost their connection. Waiting for them to come back…')}
+    else if(m.type==='back'){note()}
+    else if(m.type==='error'){note(m.msg)}
+    else if(m.type==='gone'||m.type==='left'){
+      gen++;pending={};live=false;active=false;closing=true;
+      note(m.type==='left'?'Your partner left the game.':'That game no longer exists. Start a new one.');
+      show('lobby');
+    }
+  };
+}
+function reconnect(){
+  if(++retry>40){active=false;return note('Couldn’t reconnect. Start a new game.')}
+  note('Connection lost. Reconnecting…');
+  setTimeout(()=>{if(active&&!closing)connect(()=>tx({type:'resume',code,token}))},Math.min(1000*retry,3000));
+}
+const tx=o=>ws&&ws.readyState===1&&ws.send(JSON.stringify(o));
+$('#create').onclick=()=>{note();closing=false;connect(()=>tx({type:'create',duration:+$('#dur').value,rounds:+$('#rounds').value}))};
+$('#join').onclick=()=>{
+  const c=$('#joincode').value.trim().toUpperCase();
+  if(c.length!==4)return note('Enter the 4-letter code.');
+  note();closing=false;connect(()=>tx({type:'join',code:c}));
+};
+$('#again').onclick=()=>{closing=true;active=false;gen++;pending={};if(ws)ws.close();note();show('lobby')};
+
+/* ---------- canvas ---------- */
+const cv=$('#cv'),ctx=cv.getContext('2d');
+const colors=['#1a1a1a','#e0563b','#f2a33a','#f0d84a','#4fa86b','#3a86d6','#8a5bd0','#8a5a3a'];
+let color=colors[0],erasing=false,hist=[],down=false,last,saveT;
+colors.forEach((c,i)=>{const b=document.createElement('button');b.className='sw'+(i?'':' on');b.style.background=c;b.setAttribute('aria-label','Colour '+(i+1));
+  b.onclick=()=>{color=c;erasing=false;$('#eraser').style.outline='';document.querySelectorAll('.sw').forEach(x=>x.classList.toggle('on',x===b))};$('#sws').appendChild(b)});
+$('#eraser').onclick=()=>{erasing=!erasing;$('#eraser').style.outline=erasing?'3px solid var(--acc)':''};
+const blank=()=>{ctx.fillStyle='#fff';ctx.fillRect(0,0,cv.width,cv.height);hist=[ctx.getImageData(0,0,cv.width,cv.height)]};
+const pos=e=>{const r=cv.getBoundingClientRect();return[(e.clientX-r.left)*cv.width/r.width,(e.clientY-r.top)*cv.height/r.height]};
+const stroke=(a,b)=>{ctx.strokeStyle=ctx.fillStyle=erasing?'#fff':color;ctx.lineWidth=+$('#size').value;ctx.lineCap=ctx.lineJoin='round';
+  ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke()};
+const queueSave=()=>{clearTimeout(saveT);saveT=setTimeout(()=>save(curKey,curRound-1),900)};
+cv.addEventListener('pointerdown',e=>{if(!live)return;down=true;cv.setPointerCapture(e.pointerId);last=pos(e);stroke(last,last)});
+cv.addEventListener('pointermove',e=>{if(!down)return;const p=pos(e);stroke(last,p);last=p});
+const end=()=>{if(!down)return;down=false;hist.push(ctx.getImageData(0,0,cv.width,cv.height));if(hist.length>20)hist.shift();queueSave()};
+cv.addEventListener('pointerup',end);cv.addEventListener('pointercancel',end);
+$('#undo').onclick=()=>{if(!live||hist.length<2)return;hist.pop();ctx.putImageData(hist[hist.length-1],0,0);queueSave()};
+
+/* ---------- saving and waiting ---------- */
+const dataUrl=()=>{let u=cv.toDataURL('image/png');if(u.length>1500000)u=cv.toDataURL('image/jpeg',.7);return u};
+const save=(key,done)=>{lastSave={type:'save',key,done,img:dataUrl()};tx(lastSave)};
+const waitPaper=(key,min)=>new Promise(res=>{pending[key]={res,min};tx({type:'need',key,min})});
+const loadImg=u=>new Promise(res=>{const i=new Image();i.onload=()=>{ctx.drawImage(i,0,0,cv.width,cv.height);res()};i.onerror=res;i.src=u});
+
+/* ---------- game loop ---------- */
+const holds=r=>((slot===1)===(r%2===0))?'A':'B';
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function run(){
+  const g=++gen;lastSave=null;
+  for(let r=0;r<cfg.rounds;r++){
+    if(g!==gen)return;
+    curRound=r;curKey=holds(r);blank();
+    if(r>0){show('swap');$('#swaptitle').textContent='Swapping pictures…';
+      const img=await waitPaper(curKey,r-1);if(g!==gen)return;await loadImg(img);hist=[ctx.getImageData(0,0,cv.width,cv.height)]}
+    $('#turn').textContent=(r+1)+' of '+cfg.rounds;
+    show('play');live=true;
+    const total=cfg.duration*1000,t0=Date.now();
+    while(Date.now()-t0<total&&g===gen){
+      const left=total-(Date.now()-t0);
+      $('#time').textContent=Math.ceil(left/1000)+'s';
+      $('#fill').style.width=(left/total*100)+'%';
+      await sleep(200);
+    }
+    if(g!==gen)return;
+    live=false;down=false;clearTimeout(saveT);
+    $('#time').textContent='0s';$('#fill').style.width='0%';
+    save(curKey,r);
+  }
+  show('swap');$('#swaptitle').textContent='Almost there…';
+  const fin=cfg.rounds-1;
+  const [a,b]=await Promise.all([waitPaper('A',fin),waitPaper('B',fin)]);
+  if(g!==gen)return;
+  $('#pair').innerHTML='';
+  [a,b].forEach((u,n)=>{
+    const w=document.createElement('div'),i=document.createElement('img'),d=document.createElement('a');
+    i.src=u;i.alt='Finished drawing';
+    d.href=u;d.download='swap-draw-'+(n+1)+(u.startsWith('data:image/jpeg')?'.jpg':'.png');
+    d.className='btn alt';d.textContent='Download';d.style.cssText='display:inline-block;margin-top:8px;text-decoration:none';
+    w.append(i,d);$('#pair').appendChild(w)});
+  show('reveal');
+}
+</script>
+</body>
+</html>
